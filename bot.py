@@ -17,26 +17,23 @@ def load_corp_list():
     global CORP_LIST
     if CORP_LIST:
         return
-    try:
-        r = requests.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": DART_API_KEY}, timeout=30)
-        z = zipfile.ZipFile(io.BytesIO(r.content))
-        xml_data = z.read(z.namelist()[0])
-        root = ET.fromstring(xml_data)
-        CORP_LIST = []
-        for item in root.findall("list"):
-            code = item.findtext("corp_code", "").strip()
-            name = item.findtext("corp_name", "").strip()
-            stock = item.findtext("stock_code", "").strip()
-            if code and name:
-                CORP_LIST.append({"corp_code": code, "corp_name": name, "stock_code": stock})
-        logging.info(f"기업코드 로드 완료: {len(CORP_LIST)}개")
-    except Exception as e:
-        logging.error(f"기업코드 로드 실패: {e}")
+    logging.info("기업코드 XML 다운로드 시작...")
+    r = requests.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": DART_API_KEY}, timeout=60)
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    xml_data = z.read(z.namelist()[0])
+    root = ET.fromstring(xml_data)
+    CORP_LIST = []
+    for item in root.findall("list"):
+        code  = item.findtext("corp_code", "").strip()
+        name  = item.findtext("corp_name", "").strip()
+        stock = item.findtext("stock_code", "").strip()
+        if code and name:
+            CORP_LIST.append({"corp_code": code, "corp_name": name, "stock_code": stock})
+    logging.info(f"기업코드 로드 완료: {len(CORP_LIST)}개")
 
 def search_company(name):
     load_corp_list()
-    results = [c for c in CORP_LIST if name in c["corp_name"] and c["stock_code"].strip()]
-    return results[:5]
+    return [c for c in CORP_LIST if name in c["corp_name"] and c["stock_code"].strip()][:5]
 
 def dart_get(path, params):
     params["crtfc_key"] = DART_API_KEY
@@ -144,10 +141,11 @@ async def handle(update, context):
         if 0 <= idx < len(corp_list):
             context.user_data.pop("corp_list", None)
             await fetch_send(update, corp_list[idx]); return
-    await update.message.reply_text(f"'{query}' 검색 중...")
+    await update.message.reply_text(f"'{query}' 검색 중... (첫 검색은 30초 정도 걸릴 수 있어요)")
     try:
         corps = search_company(query)
     except Exception as e:
+        logging.error(f"검색 오류: {e}")
         await update.message.reply_text(f"검색 오류: {e}"); return
     if not corps:
         await update.message.reply_text("상장 기업을 찾지 못했습니다. 정확한 기업명으로 다시 시도해주세요."); return
@@ -160,9 +158,11 @@ async def handle(update, context):
 
 async def fetch_send(update, corp):
     name,code,stock = corp["corp_name"],corp["corp_code"],corp["stock_code"]
-    await update.message.reply_text(f"{name} 데이터 불러오는 중...")
-    try: items = get_financials(code)
+    await update.message.reply_text(f"{name} 재무데이터 불러오는 중...")
+    try:
+        items = get_financials(code)
     except Exception as e:
+        logging.error(f"재무데이터 오류: {e}")
         await update.message.reply_text(f"DART 오류: {e}"); return
     if not items:
         await update.message.reply_text(f"{name}의 {YEAR}년 데이터가 없습니다."); return
@@ -170,10 +170,10 @@ async def fetch_send(update, corp):
     await update.message.reply_text(report, disable_web_page_preview=True)
 
 def main():
-    load_corp_list()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+    logging.info("봇 시작")
     app.run_polling()
 
 if __name__ == "__main__":
