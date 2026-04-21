@@ -1,8 +1,8 @@
-import os, requests, logging
+import os, requests, logging, zipfile, io
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode
 
 logging.basicConfig(level=logging.INFO)
 
@@ -11,24 +11,38 @@ DART_API_KEY   = os.environ.get("DART_API_KEY", "")
 DART_BASE      = "https://opendart.fss.or.kr/api"
 YEAR           = str(datetime.now().year - 1)
 
+CORP_LIST = []
+
+def load_corp_list():
+    global CORP_LIST
+    if CORP_LIST:
+        return
+    try:
+        r = requests.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": DART_API_KEY}, timeout=30)
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        xml_data = z.read(z.namelist()[0])
+        root = ET.fromstring(xml_data)
+        CORP_LIST = []
+        for item in root.findall("list"):
+            code = item.findtext("corp_code", "").strip()
+            name = item.findtext("corp_name", "").strip()
+            stock = item.findtext("stock_code", "").strip()
+            if code and name:
+                CORP_LIST.append({"corp_code": code, "corp_name": name, "stock_code": stock})
+        logging.info(f"기업코드 로드 완료: {len(CORP_LIST)}개")
+    except Exception as e:
+        logging.error(f"기업코드 로드 실패: {e}")
+
+def search_company(name):
+    load_corp_list()
+    results = [c for c in CORP_LIST if name in c["corp_name"] and c["stock_code"].strip()]
+    return results[:5]
+
 def dart_get(path, params):
     params["crtfc_key"] = DART_API_KEY
     r = requests.get(f"{DART_BASE}/{path}", params=params, timeout=20)
     r.raise_for_status()
     return r.json()
-
-def search_company(name):
-    # DART 전체 기업코드 XML에서 검색 (corp_name 검색은 search.json 사용)
-    data = dart_get("search.json", {
-        "corp_name": name,
-        "page_no": "1",
-        "page_count": "20",
-        "last_reprt_at": "Y"
-    })
-    items = data.get("list", [])
-    # 상장사만 필터 (stock_code 있는 것)
-    listed = [i for i in items if i.get("stock_code", "").strip()]
-    return listed[:5]
 
 def get_financials(corp_code):
     data = dart_get("fnlttSinglAcntAll.json", {
@@ -55,16 +69,16 @@ def fv(v, u="%"): return "없음" if v is None else f"{v:.1f}{u}"
 def ci(ok): return "?" if ok is None else ("OK" if ok else "NG")
 
 def analyze(items):
-    rev   = g(items,"매출액","수익(매출액)","영업수익")
-    prev  = p(items,"매출액","수익(매출액)","영업수익")
-    op    = g(items,"영업이익","영업손익")
-    net   = g(items,"당기순이익","당기순손익")
-    liab  = g(items,"부채총계")
-    eq    = g(items,"자본총계")
-    ca    = g(items,"유동자산")
-    cl    = g(items,"유동부채")
-    ocf   = g(items,"영업활동현금흐름","영업활동으로인한현금흐름")
-    iexp  = g(items,"이자비용","금융원가")
+    rev  = g(items,"매출액","수익(매출액)","영업수익")
+    prev = p(items,"매출액","수익(매출액)","영업수익")
+    op   = g(items,"영업이익","영업손익")
+    net  = g(items,"당기순이익","당기순손익")
+    liab = g(items,"부채총계")
+    eq   = g(items,"자본총계")
+    ca   = g(items,"유동자산")
+    cl   = g(items,"유동부채")
+    ocf  = g(items,"영업활동현금흐름","영업활동으로인한현금흐름")
+    iexp = g(items,"이자비용","금융원가")
     return dict(
         rev=rev, op=op, net=net, eq=eq, ocf=ocf,
         debt=pct(liab,eq), cur=pct(ca,cl), margin=pct(op,rev),
@@ -131,7 +145,8 @@ async def handle(update, context):
             context.user_data.pop("corp_list", None)
             await fetch_send(update, corp_list[idx]); return
     await update.message.reply_text(f"'{query}' 검색 중...")
-    try: corps = search_company(query)
+    try:
+        corps = search_company(query)
     except Exception as e:
         await update.message.reply_text(f"검색 오류: {e}"); return
     if not corps:
@@ -155,6 +170,7 @@ async def fetch_send(update, corp):
     await update.message.reply_text(report, disable_web_page_preview=True)
 
 def main():
+    load_corp_list()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
